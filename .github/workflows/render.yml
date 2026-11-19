@@ -1,0 +1,51 @@
+name: Render
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  render:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Open job envelope
+        env:
+          RENDER_KEY: ${{ secrets.RENDER_KEY }}
+          INPUT_URL: ${{ secrets.INPUT_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$RUNNER_TEMP/render/source"
+          cd "$RUNNER_TEMP/render"
+          curl --fail --location --silent --retry 3 "$INPUT_URL" -o input.aes
+          node "$GITHUB_WORKSPACE/envelope.mjs" open input.aes source.tgz
+          python3 -c "import tarfile; tarfile.open('source.tgz').extractall('source', filter='data')"
+      - name: Build, render and verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/render/source"
+          npm ci --no-audit --no-fund > "$RUNNER_TEMP/install.log" 2>&1 || { echo 'Dependency installation failed'; exit 1; }
+          npm run check > "$RUNNER_TEMP/check.log" 2>&1 || { echo 'Type check failed'; exit 1; }
+          npm run render -- --browser-executable=/usr/bin/google-chrome --log=error > "$RUNNER_TEMP/render.log" 2>&1 || { echo 'Video rendering failed'; exit 1; }
+          file=$(find dist -maxdepth 1 -type f -name '*.mp4' -print -quit)
+          test -s "$file"
+          cp "$file" "$RUNNER_TEMP/render/movie.mp4"
+          cd "$RUNNER_TEMP/render"
+          sha256sum movie.mp4 > SHA256SUMS
+          tar -czf result.tgz movie.mp4 SHA256SUMS
+      - name: Seal rendered video
+        env:
+          RENDER_KEY: ${{ secrets.RENDER_KEY }}
+        run: node envelope.mjs seal "$RUNNER_TEMP/render/result.tgz" "$RUNNER_TEMP/result.aes"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: render-result
+          path: ${{ runner.temp }}/result.aes
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
